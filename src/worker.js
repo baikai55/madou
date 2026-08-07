@@ -170,12 +170,57 @@ async function handleDetail(url) {
   return json(parseDetail(html, path));
 }
 
+const tokenStore = new Map();
+
+async function getToken(id) {
+  const now = Date.now();
+  const cached = tokenStore.get(id);
+  if (cached && now - cached.at < 60000) return cached.token;
+  const res = await fetch(`${DASH}/share/${id}?cb=${now}`, {
+    headers: { "User-Agent": UA, "Accept-Language": "zh-CN,zh;q=0.9" },
+  });
+  if (!res.ok) throw new Error("share " + res.status);
+  const html = await res.text();
+  const token = (html.match(/var token = "([^"]+)"/) || [])[1] || "";
+  if (token) tokenStore.set(id, { token, at: now });
+  return token;
+}
+
+async function handleHls(id) {
+  if (!/^[a-f0-9]{24}$/.test(id)) return new Response("Not Found", { status: 404 });
+  const token = await getToken(id);
+  if (!token) return new Response("Not Found", { status: 404 });
+  const res = await fetch(`${DASH}/videos/${id}/index.m3u8?token=${encodeURIComponent(token)}`, {
+    headers: { "User-Agent": UA, "Accept-Language": "zh-CN,zh;q=0.9" },
+  });
+  if (!res.ok) return new Response("Not Found", { status: 404 });
+  const base = `${DASH}/videos/${id}/`;
+  const text = (await res.text())
+    .split("\n")
+    .map((line) => {
+      const l = line.trim();
+      if (l && !l.startsWith("#") && !/^https?:\/\//i.test(l)) {
+        const [path, qs] = line.split("?");
+        return qs ? base + path + "?" + qs : base + path;
+      }
+      return line;
+    })
+    .join("\n");
+  return new Response(text, {
+    headers: {
+      "Content-Type": "application/vnd.apple.mpegurl; charset=utf-8",
+      "Cache-Control": "public, max-age=60",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+}
+
 async function handlePlay(url, id) {
   if (!/^[a-f0-9]{24}$/.test(id)) return json({ error: "请求参数无效" }, 400);
   return json({
     shareId: id,
     title: "",
-    m3u8: `${DASH}/videos/${id}/index.m3u8`,
+    m3u8: `/hls/${id}/index.m3u8`,
   });
 }
 
@@ -199,6 +244,8 @@ export default {
     if (pathname === "/api/detail") return handleDetail(url);
     if (pathname.startsWith("/api/play/")) return handlePlay(url, pathname.slice("/api/play/".length));
     if (pathname === "/api/health") return json({ ok: true });
+    if (pathname.startsWith("/hls/") && pathname.endsWith("/index.m3u8"))
+      return handleHls(pathname.slice("/hls/".length, -"/index.m3u8".length));
 
     return new Response("Not Found", { status: 404 });
   },
